@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from datetime import datetime
 
 from flask import current_app, g
+
+# Serialises catalog writes across web workers / request threads.  Route
+# registration and release-time route auditing are writes too, so they share
+# the same lock.
+write_lock = threading.RLock()
 
 
 def now_str() -> str:
@@ -81,6 +87,40 @@ CREATE TABLE IF NOT EXISTS change_log (
     detail       TEXT NOT NULL DEFAULT '',
     ok           INTEGER NOT NULL DEFAULT 1
 );
+
+-- Routes registered by cataloguers as printed in the paper guide.
+CREATE TABLE IF NOT EXISTS printed_routes (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_number        TEXT NOT NULL,
+    end_number          TEXT NOT NULL,
+    route_key           TEXT NOT NULL UNIQUE,
+    route_json          TEXT NOT NULL,
+    hops                INTEGER NOT NULL,
+    source_versions     TEXT NOT NULL DEFAULT '[]',
+    status              TEXT NOT NULL DEFAULT 'live'
+                        CHECK (status IN ('live', 'broken')),
+    registered_version  INTEGER NOT NULL,
+    registered_at       TEXT NOT NULL,
+    last_checked_version INTEGER,
+    last_checked_at     TEXT
+);
+
+-- Append-only break history.  A break record is kept even after the route is
+-- repaired; routes with any break history are no longer auto-rechecked on
+-- later releases.
+CREATE TABLE IF NOT EXISTS printed_route_breaks (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    route_id      INTEGER NOT NULL REFERENCES printed_routes(id) ON DELETE CASCADE,
+    broken_version INTEGER NOT NULL,
+    position      INTEGER NOT NULL,
+    from_number   TEXT NOT NULL,
+    to_number     TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_route_breaks_route
+    ON printed_route_breaks(route_id);
 """
 
 

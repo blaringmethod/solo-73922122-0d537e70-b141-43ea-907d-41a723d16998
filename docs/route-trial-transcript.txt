@@ -1,0 +1,54 @@
+== 0. health ==
+{"active_index_version":1,"status":"ok"}
+
+== 1. publish A1->A2->A3->A4->A5 (v2) ==
+HTTP 200 | active v 2
+ flash success 已整号替换/补录 5 行。变动 5 个号；连通圈定 5 个节点；重算现存图版 5 个；发布索引 v2，可供 5 件。
+
+== 2. publish shortcut A1->A5 (v3) ==
+HTTP 200 | active v 3
+
+== 3. route check v2 across v2+v3, A1 -> A5 ==
+HTTP 200 | 共用路线: True | route: ['A1', 'A2', 'A3', 'A4', 'A5'] | hops: 4
+   per-version table rendered: True
+
+== 4. register with active-version per-hop recheck ==
+HTTP 200
+ flash success 已登记已印路线 A1 → A5（4 跳，按现行索引 v3 逐跳复核通过）。
+stored: id=1 A1->A5 status=live hops=4 registered_version=v3 source_versions=[2, 3]
+
+== 5. release v4 withdraws A3 ==
+HTTP 200 | active v 4
+ flash success 已撤下 1 个号；直接/间接引用它们的图版已同步退出供数。变动 1 个号；连通圈定 5 个节点；重算现存图版 4 个；发布索引 v4，可供 2 件。复核已印路线 1 条，新记断点 1 条。
+ flash error 已印路线 A1 → A5 在新版 v4 的第 1 跳 A1 → A2 断开，已连同版号记入断点。
+route status: broken | break: [(4, 1, 'A1', 'A2')]
+
+== 6. release v5 refills A3 ==
+HTTP 200 | active v 5 | route status: broken | breaks kept: 1
+
+== 7. manual recheck after refill ==
+ flash success 路线复核通过（索引 v5），已恢复为可印；历史断点记录保留。
+HTTP 200 | status: live | breaks kept: 1 | last_checked v 5
+
+== 8. failed release leaves active version and break history untouched ==
+HTTP 422 | active unchanged: True | route still live: live | breaks: 1
+
+== 9. no common route; each version reachable alone (new DB scenario) ==
+HTTP 200 | 没有共用路线: True | unreachable list shown: False | both versions listed: True
+
+== 10. /routes page shows registered route and break record ==
+HTTP 200 | 已印路线与断点: True | v4 break visible: True
+
+== 11. page status codes ==
+  / 200
+  /routes 200
+  /upload 200
+  /plate?n=A1 200
+  /healthz 200
+
+== DB check ==
+index_versions: [(1, 0), (2, 5), (3, 5), (4, 2), (5, 5), (6, 9), (7, 9)]
+printed_routes: [{'id': 1, 'start_number': 'A1', 'end_number': 'A5', 'status': 'live', 'hops': 4, 'registered_version': 3, 'last_checked_version': 5}]
+printed_route_breaks: [{'route_id': 1, 'broken_version': 4, 'position': 1, 'from_number': 'A1', 'to_number': 'A2'}]
+
+TRIAL COMPLETE

@@ -2,15 +2,10 @@
 from __future__ import annotations
 
 import json
-import threading
 from dataclasses import dataclass, field
 
-from . import graph
-from .db import active_version, now_str
-
-# Catalog writes are serialised inside this process; the Docker deployment
-# runs a single gunicorn worker anyway.
-_WRITE_LOCK = threading.RLock()
+from . import graph, printed_routes
+from .db import active_version, now_str, write_lock
 
 
 class CatalogError(Exception):
@@ -27,6 +22,9 @@ class ChangeReport:
     version: int = 0
     serving_count: int = 0
     detail: str = ""
+    route_audit: printed_routes.AuditReport = field(
+        default_factory=printed_routes.AuditReport
+    )
 
 
 def _reason_for(witness: list[str] | None) -> str:
@@ -143,7 +141,7 @@ def apply_changes(
         withdrawals=withdrawals,
     )
 
-    with _WRITE_LOCK:
+    with write_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
             # Scope first, while the old state is still fully present.
@@ -205,6 +203,7 @@ def apply_changes(
                 fail_hook()
 
             # 4) Publish a new index version and flip the pointer.
+            old_version = active_version(conn)
             version = _publish_new_version(
                 conn,
                 scope=scope,
@@ -214,6 +213,16 @@ def apply_changes(
                 now=now,
             )
             report.version = version
+
+            # 5) Recheck printed guide routes touched by changed index entries.
+            #    Inside the same transaction: a failure rolls back the release
+            #    and keeps the previous version (and its break history) live.
+            report.route_audit = printed_routes.audit_release(
+                conn,
+                old_version=old_version,
+                new_version=version,
+                now=now,
+            )
             count_row = conn.execute(
                 "SELECT serving_count FROM index_versions WHERE version = ?",
                 (version,),
@@ -225,6 +234,12 @@ def apply_changes(
                 f"重算现存图版 {len(states)} 个；发布索引 v{version}，"
                 f"可供 {report.serving_count} 件。"
             )
+            audit = report.route_audit
+            if audit.checked_route_ids:
+                detail += (
+                    f"复核已印路线 {len(audit.checked_route_ids)} 条，"
+                    f"新记断点 {len(audit.new_breaks)} 条。"
+                )
             report.detail = detail
             conn.execute(
                 "INSERT INTO change_log "

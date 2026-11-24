@@ -23,24 +23,33 @@
 | 13 | 下载 CSV 直接读已发布索引 | `/download.csv`（别名 `/download`、`/index.csv`）只 SELECT 当前活动版本 `index_entries`；实测与 SQLite 逐行 MATCH | ✅ |
 | 14 | 可启动的 Docker Compose | `Dockerfile`（python:3.11-slim + gunicorn + healthcheck + /data 卷）与 `docker-compose.yml`（端口 8000、命名卷、healthcheck、重启策略） | ⚠️ 文件已交付并静态校验，本环境无 docker 守护进程，未实机构建（见第三节） |
 | 15 | 交付前核对改动、网页试跑补录/撤下/下载并写明结果 | `docs/pytest-output.txt`、`docs/web-trial-transcript.txt`、本文件；`git status` 已核对 | ✅ |
+| 16 | 路线核对页：选 2–5 个已发布索引版本 + 起点/终点，找每一跳在所选版本都成立且跳数最少的路线 | `app/routecheck.py`（版本边集交集 + BFS）；`/routes` 页面。测试 `test_shortest_route_is_minimal_and_deterministic`、`test_common_graph_intersects_every_version`、`test_history_keeps_old_index_and_route_check_uses_it` | ✅ |
+| 17 | 没有共用路线时，列出哪些版本单独也走不到终点 | `RouteAnalysis.unreachable_versions`、`VersionReach`（区分端点缺失/链不连通/单独可达及跳数）；页面同时给出每版单独路线。测试 `test_no_common_route_but_every_version_reaches_end`、`test_route_check_web_page_lists_only_unreachable_versions` | ✅ |
+| 18 | 编目员把查到的路线登记为已印；登记时用现行版逐跳复核，路线仍通即可登记（即使现行版已更新） | `printed_routes.register_route`：先校验所选历史版本确实含每一跳（防伪造），再用**活动版**逐跳复核，通过即登记（不要求仍是最短）；记录 `registered_version` 与 `source_versions`。测试 `test_register_route_rechecks_against_active_version`、`test_any_still_working_common_route_can_be_registered` | ✅ |
+| 19 | 发版只复核「涉及索引条目变动」且「尚无断点记录」的已印路线 | `routecheck.changed_index_plates`（新旧 `index_entries` EXCEPT 对比）+ `printed_routes.audit_release`（`status='live'` 且无 break 的路线，仅复核与变动号有交集的）。测试 `test_release_audit_only_rechecks_routes_with_changed_entries`、`test_release_audit_skips_routes_whose_entries_are_unchanged`、`test_break_history_survives_repair_and_suppresses_later_auto_checks` | ✅ |
+| 20 | 首次断开时随新版记版号和沿线第一个无法跳转的位置；后来补回也保留 | `printed_route_breaks`（`broken_version` / `position` / `from`→`to` / 原路线尾段），只插入不更新；修复后手动复核置 `live` 但历史保留。测试 `test_first_bad_hop_is_where_the_route_stops`、`test_break_history_survives_repair_and_suppresses_later_auto_checks`、`test_second_break_after_repair_is_appended_not_overwritten` | ✅ |
+| 21 | 发版失败则继续供原版，断点记录照旧 | 路线复核在发布事务内（`catalog.apply_changes` 第 5 步），失败整体 ROLLBACK。测试 `test_audit_failure_rolls_back_release_and_break_record`、`test_failed_release_keeps_old_version_and_break_history` | ✅ |
+| 22 | 网页可查已印路线及断点 | `/routes` 页面（路线、跳数、核对版本、登记/复核时间、状态、全部断点）与 `/api/routes` JSON。实测见 `docs/route-trial-transcript.txt` | ✅ |
 
 ---
 
 ## 二、实测结果（均为本环境真实执行）
 
-### 1. 自动化测试：20/20 通过
+### 1. 自动化测试：47/47 通过
 
 命令：`python3 -m pytest`（Flask 3.1.3 / pytest 9.2.0 / Python 3.11.2）
 
 ```
-20 passed in 0.65s
+47 passed in 2.24s
 ```
 
 覆盖：CSV/名单解析 9 例（分隔符、引号逗号、宽表、无表头、同号去重、空号报错、GBK、撤下名单注释）、
-图逻辑 6 例（缺件的直接/传递暂缓、互引环、环上缺件、撤下传播+补录恢复、
+图逻辑 7 例（缺件的直接/传递暂缓、互引环、环上缺件、撤下传播+补录恢复、
 同号整条替换、增量 scope 的旧边/新边/无向性、**失败事务回滚且旧索引不变**）、
-Web 全流程 4 例（空首页、上传→查看→下载→撤下→补录恢复、坏 CSV 422 且版本不变、
-多号文本框撤下）。完整清单见 `docs/pytest-output.txt`。
+Web 全流程 4 例、**跨版本路线与已印路线 27 例**（BFS 最少跳、版本边集交集、
+历史版本可回溯、无共用路线时逐版本可达性、登记时按活动版复核、发版按变动条目
+选择性复核、首次断点定位、断点历史保留、二次断点追加、复核失败整体回滚、
+路由页面端到端）。完整清单见 `docs/pytest-output.txt`。
 
 ### 2. 真实 gunicorn + curl 网页试跑
 
@@ -103,6 +112,22 @@ ALL CSV/INDEX CONSISTENCY CHECKS PASSED
 **⑦ 页面/接口探活**：`/`、`/upload`、`/plate?n=A1`、`/plate?n=A4`、`/healthz` 均 200；
 默认 `DB_PATH=./data/catalog.db` 冷启动建库建索引也已实测。
 
+### 2b. 路线核对 / 已印路线真实 HTTP 试跑
+
+`docs/route-trial-transcript.txt`（werkzeug 真实 HTTP 服务，独立临时库）关键结果：
+
+```
+v2: A1→A2→A3→A4→A5；v3: A1→A2;A5
+/routes?versions=v2,v3 A1→A5 -> 共用路线 A1→A2→A3→A4→A5（4 跳）
+登记 -> 按现行 v3 逐跳复核通过，registered_version=3, source_versions=[2,3]
+发版 v4 撤下 A3 -> 该路线第一次断开：broken_version=4, 第 1 跳 A1→A2
+发版 v5 补回 A3 -> 自动复核被断点历史抑制，路线仍 broken，断点保留 1 条
+手动「按现行版复核」-> live，断点历史仍保留 1 条
+坏 CSV -> 422，活动版不变，路线状态与断点不变
+两个分支版本（各自可达、无共用路线）-> 显示「没有共用路线」，不误报不可达版本
+/ /routes /upload /plate /healthz 全部 200
+```
+
 ### 3. 「失败仍供原索引」的验证方式
 
 - 自动化：`test_failed_apply_rolls_back_plates_and_keeps_old_index` 在写入后、
@@ -112,7 +137,7 @@ ALL CSV/INDEX CONSISTENCY CHECKS PASSED
 
 ### 4. 交付前改动核对
 
-- `find`/`git status` 已核对：新增 `app/`（5 个 Python 模块 + 4 模板 + 静态资源）、
+- `find`/`git status` 已核对：新增 `app/`（6 个 Python 模块 + 5 模板 + 静态资源）、
   `tests/`、`docs/`、`Dockerfile`、`docker-compose.yml`、`requirements.txt`、
   `wsgi.py`、`run.py`、`README.md`、`DELIVERY.md`。无多余数据文件入库
   （`data/`、`*.db*`、`.venv`、缓存均在 `.gitignore`/`.dockerignore`）。
@@ -126,19 +151,22 @@ ALL CSV/INDEX CONSISTENCY CHECKS PASSED
 1. **未在本环境实跑 `docker compose up --build`**：该环境没有 `docker`/`podman`
    可执行文件，也没有可用守护进程与 root 权限，无法构建镜像。已完成的替代验证：
    Compose YAML 解析通过、Dockerfile 指令与启动命令人工核对、用容器同款
-   `gunicorn wsgi:app` 在本机真实起服务并跑通上述全部 HTTP 流程。
+   `gunicorn wsgi:app`（1 worker / 4 threads）在本机真实起服务并跑通上述全部 HTTP 流程
+   （含本轮新增 `/routes` 页面）。
    **建议在有 Docker 的机器上执行一次 `docker compose up --build` 做最终确认。**
-2. **未做像素级浏览器截图**：环境无 Chromium，且缺少其系统共享库、无 root 安装。
+2. **断点后的修复依赖手动复核**：按需求「只复核尚无断点记录的已印路线」，已有断点的路线
+   不会再被自动复核；补回后需在 `/routes` 点「按现行版复核」才恢复为可印（历史断点仍保留）。
+3. **未做像素级浏览器截图**：环境无 Chromium，且缺少其系统共享库、无 root 安装。
    已用真实 HTTP 请求 + 渲染 HTML 的关键内容断言与标签配对检查替代；CSS 为手写
    响应式样式，未经过真实浏览器视觉回归。
-3. **未加登录鉴权 / CSRF 防护**：按「合作馆内网编目工具」定位，当前任何能访问
+4. **未加登录鉴权 / CSRF 防护**：按「合作馆内网编目工具」定位，当前任何能访问
    8000 端口的人都可上传/撤下。若跨网段或公网部署，需补认证与 CSRF。
-4. **水平扩展限制**：进程内写锁 + 单 gunicorn worker 适合馆级编目量级；多副本部署
+5. **水平扩展限制**：进程内写锁 + 单 gunicorn worker 适合馆级编目量级；多副本部署
    前应改为单写者服务或迁移到 C/S 数据库。未做十万行以上的性能/分页/全文搜索
    （scope 遍历与缺件查询均走索引，但前端目前一次全量渲染）。
-5. **匹配规则约定**：图版号精确匹配、区分大小写、去除首尾空白；引用号中的空白
+6. **匹配规则约定**：图版号精确匹配、区分大小写、去除首尾空白；引用号中的空白
    被视为分隔符，即图版号本身不能含空格。如业务号规则不同需调整 `split_refs`。
-6. **Git 未提交**：按助手规约「仅在用户明确要求时提交」，所有成果目前是工作区
+7. **Git 未提交**：按助手规约「仅在用户明确要求时提交」，所有成果目前是工作区
    未跟踪/新增文件；需要的话我可以再建分支提交。
 
 ---
@@ -153,7 +181,7 @@ docker compose up --build            # http://localhost:8000
 # 方式 B：本机
 python3 -m pip install -r requirements.txt
 python3 wsgi.py                      # http://127.0.0.1:8000
-python3 -m pytest                    # 回归 20 项
+python3 -m pytest                    # 回归 46 项
 ```
 
 可直接使用 `samples/` 中的剧本文件：`01_batch_with_gap.csv`（首批含缺件）→

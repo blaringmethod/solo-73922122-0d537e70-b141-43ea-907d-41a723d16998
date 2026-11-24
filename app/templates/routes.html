@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}路线核对 · 合作馆图版供数台{% endblock %}
+{% block content %}
+
+<section class="panel">
+  <h1>跨版本路线核对</h1>
+  <p class="muted">
+    合作馆展台可能安装不同版本。选 2–5 个已发布索引版本，填写起点与终点图版号：
+    结果只采用<strong>每一个所选版本里都存在的跳</strong>，并给出跳数最少的路线。
+    若各版本没有共用路线，会列出哪些版本<strong>单独</strong>也走不到终点。
+  </p>
+
+  <form method="get" action="{{ url_for('main.route_check') }}" class="route-form">
+    <div class="field">
+      <span>选择已发布索引版本（2–5 个）</span>
+      <div class="version-grid">
+        {% for v in versions %}
+        <label class="version-option">
+          <input type="checkbox" name="versions" value="{{ v.version }}"
+                 {% if v.version in selected %}checked{% endif %}>
+          <span class="mono">v{{ v.version }}{% if v.version == active_version %}（现行）{% endif %}</span>
+          <span class="muted small">{{ v.created_at }} · 可供 {{ v.serving_count }} 件</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="route-inputs">
+      <label class="field">
+        <span>起点图版号</span>
+        <input type="text" name="start" value="{{ start }}" placeholder="例如 A1">
+      </label>
+      <label class="field">
+        <span>终点图版号</span>
+        <input type="text" name="end" value="{{ end }}" placeholder="例如 A4">
+      </label>
+      <button class="btn btn-primary" type="submit">查找最少跳路线</button>
+    </div>
+  </form>
+
+  {% if errors %}
+  <ul class="error-list">
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+{% if analysis %}
+<section class="panel result-panel">
+  <h2>核对结果：{{ analysis.start }} → {{ analysis.end }}</h2>
+  <div class="chip-row">
+    <span class="chip chip-scope">所选版本</span>
+    {% for v in analysis.versions %}
+      <span class="chip">v{{ v }}</span>
+    {% endfor %}
+  </div>
+
+  {% if analysis.common_route %}
+    <div class="alert alert-ok">
+      <strong>共用路线：{{ analysis.common_hops }} 跳</strong>
+      <div class="chain chain-large">
+        {% for n in analysis.common_route %}
+          <span class="chain-node">{{ n }}</span>
+          {% if not loop.last %}<span class="chain-arrow">→</span>{% endif %}
+        {% endfor %}
+      </div>
+      该路线每一跳在所选 {{ analysis.versions|length }} 个版本里都存在；
+      登记时会再按现行版逐跳复核。
+    </div>
+    <form method="post" action="{{ url_for('main.route_register') }}" class="inline">
+      <input type="hidden" name="start" value="{{ analysis.start }}">
+      <input type="hidden" name="end" value="{{ analysis.end }}">
+      <input type="hidden" name="versions"
+             value="{{ analysis.versions|join(',') }}">
+      <input type="hidden" name="route"
+             value="{{ analysis.common_route|tojson|forceescape }}">
+      <button class="btn btn-primary" type="submit">登记为已印路线（按现行版复核）</button>
+    </form>
+    <p class="muted small">
+      登记时会用现行版逐跳复核；路线仍通即可登记，即使现行版已比所选版本新。
+    </p>
+  {% else %}
+    <div class="alert alert-bad">
+      <strong>没有共用路线：</strong>不存在一条每一跳都在全部所选版本里成立的路线。
+    </div>
+  {% endif %}
+
+  {% if analysis.unreachable_versions %}
+    <div class="alert alert-warn">
+      <strong>单独也走不到终点的版本：</strong>
+      {% for v in analysis.unreachable_versions %}<span class="chip">v{{ v }}</span>{% endfor %}
+      这些版本即使不要求与其他版本共用路线，也无法从起点到达终点。
+    </div>
+  {% endif %}
+
+  <h3>各版本单独可达性</h3>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>版本</th><th>单独能否到达终点</th><th>最少跳数</th><th>该版本内的路线</th></tr></thead>
+    <tbody>
+      {% for item in analysis.per_version %}
+      <tr>
+        <td class="mono">v{{ item.version }}</td>
+        <td>
+          {% if item.reachable %}<span class="badge badge-ok">可达</span>
+          {% else %}<span class="badge badge-bad">走不到终点</span>{% endif %}
+        </td>
+        <td>{{ item.hops if item.hops is not none else '—' }}</td>
+        <td>
+          {% if item.reachable %}
+            <div class="chain">
+              {% for n in item.route %}
+                <span class="chain-node">{{ n }}</span>
+                {% if not loop.last %}<span class="chain-arrow">→</span>{% endif %}
+              {% endfor %}
+            </div>
+          {% else %}
+            <span class="muted small">
+              {% if not item.start_present %}起点不在该版索引中。{% endif %}
+              {% if not item.end_present %}终点不在该版索引中。{% endif %}
+              {% if item.start_present and item.end_present %}引用链不连通。{% endif %}
+            </span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>已印路线与断点</h2>
+  {% if routes %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>编号</th><th>起点 → 终点</th><th>路线</th><th>登记</th>
+          <th>状态</th><th>断点记录</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for r in routes %}
+      <tr class="{{ 'row-missing' if r.status == 'broken' else '' }}">
+        <td class="mono">#{{ r.id }}</td>
+        <td class="mono">{{ r.start }} → {{ r.end }}<br>
+          <span class="muted small">{{ r.hops }} 跳</span></td>
+        <td>
+          <div class="chain">
+            {% for n in r.route %}
+              <span class="chain-node">{{ n }}</span>
+              {% if not loop.last %}<span class="chain-arrow">→</span>{% endif %}
+            {% endfor %}
+          </div>
+          <span class="muted small">
+            核对版本：{% for v in r.source_versions %}v{{ v }}{% if not loop.last %}、{% endif %}{% endfor %}
+          </span>
+        </td>
+        <td>{{ r.registered_at }}<br>
+          <span class="muted small">按 v{{ r.registered_version }} 复核</span></td>
+        <td>
+          {% if r.status == 'live' %}
+            <span class="badge badge-ok">可印</span>
+          {% else %}
+            <span class="badge badge-bad">已断</span>
+          {% endif %}
+          {% if r.last_checked_at %}
+            <div class="muted small">最近复核 v{{ r.last_checked_version }} · {{ r.last_checked_at }}</div>
+          {% endif %}
+        </td>
+        <td>
+          {% if r.breaks %}
+            {% for b in r.breaks %}
+              <div class="break-record">
+                <strong>v{{ b.broken_version }}</strong> 第 {{ b.position }} 跳
+                <span class="mono">{{ b.from_number }} → {{ b.to_number }}</span>
+                <div class="muted small">{{ b.reason }}</div>
+                <div class="muted small">记录于 {{ b.created_at }}</div>
+              </div>
+            {% endfor %}
+          {% else %}
+            <span class="muted small">无</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="{{ url_for('main.route_recheck', route_id=r.id) }}" class="inline">
+            <button class="btn btn-small btn-ghost" type="submit">按现行版复核</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="empty">还没有登记任何已印路线。先用上方表单核对路线并登记。</p>
+  {% endif %}
+</section>
+
+{% endblock %}

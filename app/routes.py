@@ -17,7 +17,7 @@ from flask import (
     url_for,
 )
 
-from . import catalog, graph
+from . import catalog, graph, printed_routes, routecheck
 from .db import active_version, get_db
 
 bp = Blueprint("main", __name__)
@@ -108,6 +108,13 @@ def _load_state(conn) -> dict:
         "SELECT * FROM index_versions ORDER BY version DESC LIMIT 8"
     ).fetchall()
 
+    route_counts = conn.execute(
+        """
+        SELECT status, COUNT(*) AS c FROM printed_routes GROUP BY status
+        """
+    ).fetchall()
+    routes_by_status = {r["status"]: r["c"] for r in route_counts}
+
     return {
         "active_version": version,
         "version_row": version_row,
@@ -119,6 +126,10 @@ def _load_state(conn) -> dict:
             "serving": len(serving),
             "suspended": len(suspended),
             "missing": len(missing),
+        },
+        "route_stats": {
+            "live": routes_by_status.get("live", 0),
+            "broken": routes_by_status.get("broken", 0),
         },
         "latest_change": latest_change,
         "recent_versions": recent_versions,
@@ -138,6 +149,152 @@ def dashboard():
 @bp.route("/upload", methods=["GET"])
 def upload_page():
     return render_template("upload.html", parse_result=None)
+
+
+@bp.route("/routes")
+def route_check():
+    conn = get_db()
+    versions = _published_versions(conn)
+    versions_raw = request.args.getlist("versions")
+    version_param = ",".join(versions_raw)
+    start = request.args.get("start", "").strip()
+    end = request.args.get("end", "").strip()
+    selected: list[int] = []
+    errors: list[str] = []
+    analysis = None
+    if version_param or start or end:
+        selected = _parse_versions(version_param)
+        if not selected:
+            errors.append("请选择 2 到 5 个已发布索引版本。")
+        elif len(selected) < 2 or len(selected) > 5:
+            errors.append("请选择 2 到 5 个已发布索引版本。")
+        elif any(v not in {row["version"] for row in versions} for v in selected):
+            errors.append("所选版本中有一项不是已发布索引版本。")
+        if not start:
+            errors.append("请填写起点图版号。")
+        if not end:
+            errors.append("请填写终点图版号。")
+        if start and end and start == end:
+            errors.append("起点与终点不能相同。")
+        if not errors:
+            analysis = routecheck.analyse_versions(conn, selected, start, end)
+
+    return render_template(
+        "routes.html",
+        versions=versions,
+        selected=selected,
+        version_param=",".join(str(v) for v in selected),
+        start=start,
+        end=end,
+        errors=errors,
+        analysis=analysis,
+        routes=printed_routes.list_routes(conn),
+    )
+
+
+def _flash_route_audit(report) -> None:
+    """Surface release-time printed-route breaks in the flash stream."""
+    for event in report.route_audit.new_breaks:
+        flash(
+            f"已印路线 {event.start} → {event.end} 在新版 v{event.version} 的第 "
+            f"{event.position} 跳 {event.from_number} → {event.to_number} 断开，"
+            "已连同版号记入断点。",
+            "error",
+        )
+
+
+def _published_versions(conn) -> list:
+    return conn.execute(
+        "SELECT version, created_at, source, serving_count "
+        "FROM index_versions ORDER BY version DESC"
+    ).fetchall()
+
+
+def _parse_versions(raw: str) -> list[int]:
+    out: list[int] = []
+    for token in raw.replace("，", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.append(int(token))
+        except ValueError:
+            return []
+    return list(dict.fromkeys(out))
+
+
+@bp.route("/routes/register", methods=["POST"])
+def route_register():
+    versions = _parse_versions(request.form.get("versions", ""))
+    start = request.form.get("start", "").strip()
+    end = request.form.get("end", "").strip()
+    route_text = request.form.get("route", "").strip()
+    try:
+        parsed_route = json.loads(route_text)
+        route = (
+            [str(n).strip() for n in parsed_route if str(n).strip()]
+            if isinstance(parsed_route, list)
+            else []
+        )
+    except (TypeError, ValueError):
+        # Manual entry fallback: "A1 → A2 → A3".
+        route = printed_routes.parse_route_text(route_text)
+    try:
+        if len(versions) < 2 or len(versions) > 5:
+            raise printed_routes.RouteError("核对版本应为 2 到 5 个。")
+        published = {
+            row["version"] for row in _published_versions(get_db())
+        }
+        if any(v not in published for v in versions):
+            raise printed_routes.RouteError("所选核对版本中有未发布的版本。")
+        result = printed_routes.register_route(
+            conn=get_db(),
+            route=route,
+            source_versions=versions,
+            start=start,
+            end=end,
+        )
+    except printed_routes.RouteError as exc:
+        flash(f"登记失败：{exc}", "error")
+        return redirect(
+            url_for(
+                "main.route_check",
+                versions=",".join(str(v) for v in versions),
+                start=start,
+                end=end,
+            )
+        )
+    flash(
+        f"已登记已印路线 {result['start']} → {result['end']}（{result['hops']} 跳，"
+        f"按现行索引 v{result['registered_version']} 逐跳复核通过）。",
+        "success",
+    )
+    return redirect(url_for("main.route_check"))
+
+
+@bp.route("/routes/<int:route_id>/recheck", methods=["POST"])
+def route_recheck(route_id: int):
+    try:
+        result = printed_routes.recheck_route(get_db(), route_id)
+    except printed_routes.RouteError as exc:
+        flash(f"复核失败：{exc}", "error")
+        return redirect(url_for("main.route_check"))
+    if result["break"] is not None:
+        event = result["break"]
+        flash(
+            f"路线 {event.start} → {event.end} 在索引 v{event.version} 的第 "
+            f"{event.position} 跳 {event.from_number} → {event.to_number} 断开，已记断点。",
+            "error",
+        )
+    elif result["repaired"]:
+        flash(
+            f"路线复核通过（索引 v{result['version']}），已恢复为可印；"
+            "历史断点记录保留。",
+            "success",
+        )
+    else:
+        flash(f"路线复核通过（索引 v{result['version']}）。", "success")
+    return redirect(url_for("main.route_check"))
 
 
 @bp.route("/plate")
@@ -262,6 +419,7 @@ def upload_submit():
         f"已整号替换/补录 {len(parsed.rows)} 行。{report.detail}",
         "success",
     )
+    _flash_route_audit(report)
     return redirect(url_for("main.dashboard"))
 
 
@@ -280,6 +438,7 @@ def load_demo():
         source="内置演示数据",
         action="upload",
     )
+    _flash_route_audit(report)
     flash("已载入内置演示数据。" + report.detail, "success")
     return redirect(url_for("main.dashboard"))
 
@@ -349,6 +508,7 @@ def withdraw_submit():
         + report.detail,
         "success",
     )
+    _flash_route_audit(report)
     return redirect(url_for("main.dashboard"))
 
 
@@ -425,6 +585,13 @@ def api_state():
             else None
         ),
     }
+
+
+@bp.route("/api/routes")
+def api_routes():
+    conn = get_db()
+    active_only = request.args.get("status") == "live"
+    return {"routes": printed_routes.list_routes(conn, active_only=active_only)}
 
 
 @bp.route("/api/index")

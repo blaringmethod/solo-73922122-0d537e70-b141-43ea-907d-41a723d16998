@@ -23,12 +23,18 @@
     <span class="stat-num">v{{ active_version }}</span>
     <span class="stat-label">已发布索引 · {{ version_row.created_at if version_row else '' }}</span>
   </div>
+  <div class="stat {{ 'stat-bad' if route_stats.broken else '' }}">
+    <a class="stat-num" href="{{ url_for('main.route_check') }}"
+       style="text-decoration:none;color:inherit;">{{ route_stats.live }} / {{ route_stats.broken }}</a>
+    <span class="stat-label">已印路线 · 可印 / 已断</span>
+  </div>
 </section>
 
 <section class="panel actions">
   <div class="action-main">
     <a class="btn btn-primary" href="{{ url_for('main.upload_page') }}">上传 CSV（补录 / 同号整条替换）</a>
     <a class="btn btn-ghost" href="{{ url_for('main.download_csv') }}">下载已发布索引 CSV</a>
+    <a class="btn btn-ghost" href="{{ url_for('main.route_check') }}">跨版本路线核对 / 已印路线</a>
     <a class="btn btn-ghost" href="{{ url_for('static', filename='sample_catalog.csv') }}">下载样例 CSV</a>
     <form method="post" action="{{ url_for('main.load_demo') }}" class="inline"
           onsubmit="return confirm('将写入内置演示图版（同号会整条替换），确定？');">

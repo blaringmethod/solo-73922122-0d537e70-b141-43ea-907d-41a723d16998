@@ -32,7 +32,7 @@ python3 wsgi.py            # 或 gunicorn -b 127.0.0.1:8000 wsgi:app
 
 ```bash
 python3 -m pip install pytest
-python3 -m pytest          # 20 个用例：解析 / 图算法 / 增量圈定 / 原子性 / Web 全流程
+python3 -m pytest          # 47 个用例：解析 / 图算法 / 增量圈定 / 原子性 / 路线核对 / 断点复核 / Web 全流程
 ```
 
 `samples/` 带一套 3 分钟验收剧本（含缺件批次 → 补录 → 撤下名单 → 再补回）。
@@ -76,11 +76,32 @@ TP-003,青铜纹饰图版,TP-002
 6. **下载直接读已发布索引**：`GET /download.csv`（另有 `/download`、`/index.csv`）
    只对当前活动版本的 `index_entries` 做一条 SELECT，不在下载时临时计算。
 
+## 跨版本路线核对与已印路线
+
+合作馆各展台可能装着不同版本的供数索引，纸质导览只能印一条跳转路线。
+
+- **`/routes` 路线核对页**：勾选 2–5 个已发布索引版本，填起点、终点图版号。
+  页面先求各版本引用边的**交集**，再在其中做 BFS，给出跳数最少的**共用路线**；
+  若没有共用路线，会明确说明，并列出哪些版本**单独**也走不到终点（区分「起点/终点
+  不在该版索引」与「引用链不连通」），同时给出每个版本单独的最短路线。
+- **登记为已印**：编目员可把共用路线登记。登记时用**现行版**逐跳复核，路线仍通即可
+  登记（即使现行版已比核对时新），并记录核对所用的版本清单。
+- **发版复核**：每次发布新索引版本时，只复核「路线经过的图版中至少有一个索引条目
+  发生变化」且「尚无断点记录」的已印路线。首次断开时随新版记录版号与沿线第一个无法
+  跳转的位置（第几跳、从哪到哪），断点记录只增不删；之后补回该路线也不会删除历史
+  断点，可用路线页的「按现行版复核」按钮确认恢复。
+- **前向保护**：发版事务包含路线复核。复核写入失败则整个发版回滚，继续供原版索引，
+  断点记录保持发版前状态。
+- 网页 `/routes` 与 `/api/routes` 可查已印路线、状态、最近复核版本与全部断点记录。
+
 ## 页面与接口
 
 | 路径 | 说明 |
 | --- | --- |
 | `/` | 供数总览：统计卡、供数表、暂缓表（含断链路径）、缺件号、最近增量 scope、索引版本史、按号撤下框 |
+| `/routes` | 跨版本路线核对（2–5 个版本）+ 已印路线与断点清单 |
+| `/routes/register` | POST 登记已印路线（按现行版逐跳复核） |
+| `/routes/<id>/recheck` | POST 按现行版复核一条已印路线（保留断点历史） |
 | `/upload` | GET 上传表单 / POST 上传 CSV（`csv_file` 文件或 `csv_text` 粘贴） |
 | `/withdraw` | POST 按号撤下：`number` 单个或 `numbers` 多个（换行/空格/逗号/分号分隔） |
 | `/plate?n=号` | 图版/缺件详情：状态、断链 witness、直接引用与被引用清单 |
@@ -88,20 +109,23 @@ TP-003,青铜纹饰图版,TP-002
 | `/download.csv` `/download` `/index.csv` | 下载当前活动已发布索引（带 UTF-8 BOM，Excel 友好） |
 | `/api/state` | 全量视图模型 JSON + 最近一次变动的 `changed` / `scope` |
 | `/api/index` | 当前活动索引版本的条目 JSON |
+| `/api/routes` | 已印路线及断点记录 JSON |
 | `/healthz` | 存活与活动索引版本 |
 
 ## 代码结构
 
 ```
 app/
-  __init__.py   # Flask 工厂、JSON/过滤器配置
-  db.py         # SQLite 连接、schema（plates/refs/plate_status/index_*）
-  graph.py      # CSV 解析、增量 scope 闭包、缺件反向传播
-  catalog.py    # 事务化增删改 + 发布新索引版本
-  routes.py     # 页面 / 下载 / JSON API
-  templates/    # base/index/upload/plate 四个服务端渲染页面
-  static/       # style.css 与 sample_catalog.csv
-tests/          # 19 个 pytest 用例
+  __init__.py     # Flask 工厂、JSON/过滤器配置
+  db.py           # SQLite 连接、schema（plates/refs/plate_status/index_*/printed_route*）
+  graph.py        # CSV 解析、增量 scope 闭包、缺件反向传播
+  catalog.py      # 事务化增删改 + 发布新索引版本 + 发版时路线复核
+  routecheck.py   # 跨版本边集交集、BFS 最少跳路线、逐版本可达性
+  printed_routes.py # 已印路线登记、断点记录、发版复核与手动复核
+  routes.py       # 页面 / 下载 / JSON API
+  templates/      # base/index/upload/plate/routes 五个服务端渲染页面
+  static/         # style.css 与 sample_catalog.csv
+tests/            # 47 个 pytest 用例
 docs/           # 实测记录（pytest 输出、Web 试跑 transcript）
 Dockerfile docker-compose.yml wsgi.py
 ```
